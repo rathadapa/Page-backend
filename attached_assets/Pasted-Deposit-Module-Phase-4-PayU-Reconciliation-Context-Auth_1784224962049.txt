@@ -1,0 +1,177 @@
+Deposit Module – Phase 4 (PayU Reconciliation)
+
+Context
+
+Authentication, Wallet, Deposit Initiation and PayU Callback are already fully implemented.
+
+A shared deposit-completion service already exists.
+
+Reuse it.
+
+Do NOT duplicate any business logic.
+
+--------------------------------------------------
+
+Objective
+
+Implement a reconciliation service that automatically recovers deposits if the PayU callback was never received.
+
+This is an internal backend feature.
+
+No frontend changes.
+
+--------------------------------------------------
+
+PayU Verify API
+
+Use ONLY the official PayU Verify Payment API.
+
+Command:
+
+verify_payment
+
+Hash:
+
+sha512(key|command|merchantOrderId|SALT)
+
+Do not invent any API fields.
+
+--------------------------------------------------
+
+Scope
+
+Implement:
+
+1. Internal reconciliation service.
+
+2. Verify API client.
+
+3. Reconciliation function.
+
+Do NOT create cron jobs yet.
+
+Do NOT schedule anything.
+
+Only make the service callable.
+
+--------------------------------------------------
+
+Behaviour
+
+Input:
+
+merchantOrderId
+
+Flow:
+
+1. Lock deposit row.
+
+2. If deposit does not exist:
+
+return "ignored"
+
+3. If deposit already completed:
+
+return "already_processed"
+
+4. Call Verify Payment API.
+
+5. Verify PayU response.
+
+6. If verified success:
+
+call completeSuccessfulDeposit()
+
+7. If verified failure:
+
+call completeFailedDeposit()
+
+8. Commit.
+
+--------------------------------------------------
+
+Atomicity
+
+Database changes must remain inside one transaction.
+
+Never allow:
+
+deposit success without wallet credit
+
+wallet credit without deposit success
+
+--------------------------------------------------
+
+Security
+
+Never trust Verify API blindly.
+
+Validate:
+
+merchantOrderId
+
+amount
+
+status
+
+mihpayid
+
+Hash (if applicable according to official API)
+
+Never log:
+
+PAYU_KEY
+
+PAYU_SALT
+
+raw hashes
+
+--------------------------------------------------
+
+Architecture
+
+The webhook and reconciliation must share the same completion service.
+
+No duplicate wallet logic.
+
+No duplicate deposit update logic.
+
+--------------------------------------------------
+
+Testing
+
+Verify:
+
+✓ pending success
+
+✓ pending failure
+
+✓ already completed
+
+✓ unknown merchantOrderId
+
+✓ Verify API error
+
+✓ rollback
+
+✓ typecheck
+
+--------------------------------------------------
+
+Report
+
+After implementation provide:
+
+1. Files created
+
+2. Files modified
+
+3. Verify API implementation
+
+4. Transaction verification
+
+5. Rollback verification
+
+6. Tests
+
+7. Remaining blockers before live production.
