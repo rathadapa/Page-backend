@@ -1,0 +1,676 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: auth
+    description: Authentication operations
+  - name: users
+    description: User profile operations
+  - name: wallet
+    description: Wallet & coin operations
+  - name: deposits
+    description: Deposit operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /auth/signup:
+    post:
+      operationId: signup
+      tags: [auth]
+      summary: Create a new user account
+      description: >
+        Creates a user account with name, username, age, and password, then
+        starts a new server-side session for the account (auto-login).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignupInput"
+      responses:
+        "201":
+          description: Account created and session started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Username already taken
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Authenticate with username and password
+      description: >
+        Verifies credentials, invalidates any previous active session for
+        the account, and starts a new session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginInput"
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid username or password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: End the current session
+      description: Deletes the current server-side session, if any.
+      security:
+        - sessionCookie: []
+      responses:
+        "204":
+          description: Session ended
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /users/me:
+    get:
+      operationId: getCurrentUser
+      tags: [users]
+      summary: Get the authenticated user's profile
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /wallet/balance:
+    get:
+      operationId: getWalletBalance
+      tags: [wallet]
+      summary: Get the authenticated user's wallet balances
+      description: >
+        Returns the current Play Coins and Winning Coins balances for the
+        authenticated user.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Wallet balances
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletBalance"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /wallet/transactions:
+    get:
+      operationId: getWalletTransactions
+      tags: [wallet]
+      summary: Get the authenticated user's wallet transaction history
+      description: >
+        Returns a page of the ledger for one of the user's wallets, newest
+        first.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: walletType
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/WalletType"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: before
+          in: query
+          required: false
+          description: Return only transactions created before this timestamp.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: A page of wallet transactions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetWalletTransactionsResult"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /deposits/initiate:
+    post:
+      operationId: initiateDeposit
+      tags: [deposits]
+      summary: Initiate a deposit
+      description: >
+        Creates a pending deposit record and returns the parameters the
+        frontend must POST to PayU to continue the payment flow. The
+        deposit remains in `pending` status until a PayU webhook confirms
+        the outcome.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DepositInitiateInput"
+      responses:
+        "201":
+          description: Deposit initiated — PayU form parameters ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepositInitiateResult"
+        "400":
+          description: Validation error (e.g. invalid package amount)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /deposits/history:
+    get:
+      operationId: getDepositHistory
+      tags: [deposits]
+      summary: Get the authenticated user's deposit history
+      description: >
+        Returns a page of the authenticated user's deposits, newest first.
+        Supports cursor-based pagination via the `before` timestamp.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: before
+          in: query
+          required: false
+          description: Return only deposits created before this timestamp.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: A page of deposits
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetDepositHistoryResult"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /deposits/{id}:
+    get:
+      operationId: getDeposit
+      tags: [deposits]
+      summary: Get a single deposit by ID
+      description: >
+        Returns a deposit belonging to the authenticated user.
+        Returns 404 if the deposit does not exist or belongs to a
+        different user.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Deposit found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deposit"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Deposit not found or does not belong to the authenticated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /wallet/convert:
+    post:
+      operationId: convertWinningToPlay
+      tags: [wallet]
+      summary: Convert Winning Coins into Play Coins
+      description: >
+        Atomically debits the given amount from the user's Winning Coins
+        wallet and credits it to their Play Coins wallet. Safe to retry
+        with the same idempotencyKey without double-applying.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConvertWinningToPlayInput"
+      responses:
+        "200":
+          description: Conversion applied, resulting balances returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletBalance"
+        "400":
+          description: Validation error or insufficient Winning Coins balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: sid
+      description: Opaque server-side session token issued on signup/login.
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    User:
+      type: object
+      description: A user account, excluding all credential/session material.
+      required: [id, username, name, age, accountStatus, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        name:
+          type: string
+        age:
+          type: integer
+        email:
+          type: string
+          format: email
+          nullable: true
+          description: >
+            Collected during the user's first deposit flow, not at signup.
+            Null until the user provides it. Required before a deposit can
+            be initiated.
+        accountStatus:
+          type: string
+          enum: [active, suspended, deactivated]
+        createdAt:
+          type: string
+          format: date-time
+    SignupInput:
+      type: object
+      required: [name, username, age, password]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        username:
+          type: string
+          minLength: 3
+          maxLength: 32
+          pattern: "^[a-zA-Z0-9_]+$"
+        age:
+          type: integer
+          minimum: 18
+          maximum: 120
+        password:
+          type: string
+          minLength: 10
+          maxLength: 128
+    LoginInput:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          minLength: 1
+    ErrorResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+    WalletType:
+      type: string
+      enum: [play_coins, winning_coins]
+    WalletBalance:
+      type: object
+      description: >
+        A user's current coin balances. 1 coin = ₹1. Play Coins are spent on
+        entry fees and funded by deposits; Winning Coins are earned from
+        matches/tournaments and are the only balance that can be withdrawn.
+      required: [playCoins, winningCoins]
+      properties:
+        playCoins:
+          type: integer
+        winningCoins:
+          type: integer
+    WalletTransaction:
+      type: object
+      description: >
+        A single immutable ledger entry. There is no status field — every
+        row represents an already-completed balance change.
+      required: [id, amount, balanceAfter, idempotencyKey, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          description: Signed whole-coin amount. Positive is a credit, negative is a debit.
+        balanceAfter:
+          type: integer
+        referenceType:
+          type: string
+          nullable: true
+        referenceId:
+          type: string
+          format: uuid
+          nullable: true
+        idempotencyKey:
+          type: string
+        reversalOfTransactionId:
+          type: string
+          format: uuid
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+    GetWalletTransactionsResult:
+      type: object
+      required: [transactions]
+      properties:
+        transactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WalletTransaction"
+    ConvertWinningToPlayInput:
+      type: object
+      required: [amount, idempotencyKey]
+      properties:
+        amount:
+          type: integer
+          minimum: 1
+          description: Whole number of Winning Coins to convert into Play Coins.
+        idempotencyKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: >
+            Client-generated key identifying this conversion attempt.
+            Retrying the same request with the same key will not
+            double-apply the conversion.
+    DepositStatus:
+      type: string
+      enum: [pending, success, failed]
+      description: >
+        Lifecycle state of a deposit attempt.
+        `pending` — initiated, awaiting PayU webhook.
+        `success` — PayU confirmed payment; Play Coins credited.
+        `failed` — PayU reported failure or the attempt was abandoned.
+    Deposit:
+      type: object
+      description: >
+        A single deposit attempt. One row = one attempt. The deposit
+        remains `pending` until a PayU webhook updates it to `success`
+        or `failed`.
+      required:
+        - id
+        - userId
+        - amount
+        - coinsToCredit
+        - status
+        - merchantOrderId
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          description: Deposit amount in whole rupees.
+        coinsToCredit:
+          type: integer
+          description: >
+            Play Coins to be credited when the deposit succeeds.
+            Equal to `amount` under the current 1 coin = ₹1 rate.
+        status:
+          $ref: "#/components/schemas/DepositStatus"
+        merchantOrderId:
+          type: string
+          description: >
+            Our unique key sent to PayU as `txnid`. Used to match
+            incoming webhooks back to this deposit row.
+        mihpayId:
+          type: string
+          nullable: true
+          description: >
+            PayU's unique transaction identifier, populated when the
+            webhook is received. Used for duplicate webhook detection.
+        payuTxnId:
+          type: string
+          nullable: true
+          description: PayU's `txnid` echo from the webhook, stored for reconciliation.
+        failureReason:
+          type: string
+          nullable: true
+          description: Populated when status is `failed`. Null otherwise.
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Timestamp when the deposit transitioned to `success` or `failed`.
+            Null while status is `pending`.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    DepositInitiateInput:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          type: integer
+          enum: [50, 100, 200, 500, 1000, 2000, 5000]
+          description: >
+            Deposit amount in whole rupees. Must be one of the fixed
+            packages: ₹50, ₹100, ₹200, ₹500, ₹1000, ₹2000, ₹5000.
+    PayUFormParams:
+      type: object
+      description: >
+        Parameters the frontend must POST to PayU's payment page to
+        continue the payment flow. All fields are PayU-mandated.
+        The `hash` is pre-computed server-side and must not be
+        recomputed or modified by the client.
+      required:
+        - key
+        - txnid
+        - amount
+        - productinfo
+        - firstname
+        - email
+        - surl
+        - furl
+        - hash
+      properties:
+        key:
+          type: string
+          description: PayU merchant key.
+        txnid:
+          type: string
+          description: Our `merchantOrderId`, sent to PayU as the transaction ID.
+        amount:
+          type: string
+          description: Amount as a string (PayU requires string format, e.g. "100.00").
+        productinfo:
+          type: string
+          description: Human-readable product description shown on the PayU page.
+        firstname:
+          type: string
+          description: User's first name, shown on the PayU page.
+        email:
+          type: string
+          format: email
+          description: User's email address, required by PayU.
+        phone:
+          type: string
+          description: User's phone number (optional for PayU but recommended).
+        surl:
+          type: string
+          format: uri
+          description: Success redirect URL PayU will POST to after payment.
+        furl:
+          type: string
+          format: uri
+          description: Failure redirect URL PayU will POST to after payment.
+        hash:
+          type: string
+          description: >
+            SHA-512 HMAC computed server-side using the PayU salt.
+            The client must include this value verbatim in the form POST.
+    DepositInitiateResult:
+      type: object
+      required: [deposit, payuFormParams, paymentUrl]
+      properties:
+        deposit:
+          $ref: "#/components/schemas/Deposit"
+        payuFormParams:
+          $ref: "#/components/schemas/PayUFormParams"
+        paymentUrl:
+          type: string
+          format: uri
+          description: >
+            PayU payment page URL the frontend must POST payuFormParams to.
+            Determined by PAYU_ENV: test → https://test.payu.in/_payment,
+            production → https://secure.payu.in/_payment.
+    GetDepositHistoryResult:
+      type: object
+      required: [deposits]
+      properties:
+        deposits:
+          type: array
+          items:
+            $ref: "#/components/schemas/Deposit"
