@@ -446,18 +446,42 @@ components:
     WalletType:
       type: string
       enum: [play_coins, winning_coins]
+    WalletCoinBalance:
+      type: object
+      description: >
+        Balance snapshot for a single coin type. `available` is the freely
+        spendable amount; `reserved` is locked by active holds (pending
+        withdrawals, tournament entries, admin/fraud holds).
+        available = balance − reserved.
+      required: [balance, reserved, available]
+      properties:
+        balance:
+          type: integer
+          description: >
+            Total settled balance — the sum of all completed ledger entries.
+        reserved:
+          type: integer
+          description: >
+            Coins locked by active reservations. Cannot be spent or converted
+            until the hold is released or confirmed.
+        available:
+          type: integer
+          description: >
+            Freely spendable coins (balance minus reserved).
     WalletBalance:
       type: object
       description: >
         A user's current coin balances. 1 coin = ₹1. Play Coins are spent on
         entry fees and funded by deposits; Winning Coins are earned from
         matches/tournaments and are the only balance that can be withdrawn.
+        Each coin type exposes `balance` (total settled), `reserved` (locked
+        by active holds), and `available` (freely spendable).
       required: [playCoins, winningCoins]
       properties:
         playCoins:
-          type: integer
+          $ref: "#/components/schemas/WalletCoinBalance"
         winningCoins:
-          type: integer
+          $ref: "#/components/schemas/WalletCoinBalance"
     WalletTransaction:
       type: object
       description: >

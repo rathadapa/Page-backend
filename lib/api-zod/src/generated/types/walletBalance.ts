@@ -5,11 +5,12 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
+import type { WalletCoinBalance } from './walletCoinBalance';
 
 /**
- * A user's current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches/tournaments and are the only balance that can be withdrawn.
+ * A user's current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches/tournaments and are the only balance that can be withdrawn. Each coin type exposes `balance` (total settled), `reserved` (locked by active holds), and `available` (freely spendable).
  */
 export interface WalletBalance {
-  playCoins: number;
-  winningCoins: number;
+  playCoins: WalletCoinBalance;
+  winningCoins: WalletCoinBalance;
 }

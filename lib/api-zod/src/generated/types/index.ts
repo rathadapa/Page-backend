@@ -24,5 +24,6 @@ export * from './signupInput';
 export * from './user';
 export * from './userAccountStatus';
 export * from './walletBalance';
+export * from './walletCoinBalance';
 export * from './walletTransaction';
 export * from './walletType';

@@ -25,6 +25,22 @@ export class InsufficientBalanceError extends Error {
 }
 
 /**
+ * Thrown when a debit would succeed against the total settled balance but
+ * would dip into coins that are locked by an active reservation. The caller
+ * should surface this to the user as "some of your balance is reserved for
+ * a pending withdrawal or hold" rather than "you don't have enough coins".
+ */
+export class InsufficientAvailableBalanceError extends Error {
+  constructor(walletType: WalletType) {
+    super(
+      `Insufficient available ${walletType} balance. ` +
+        `Some coins are reserved by an active hold (e.g. a pending withdrawal).`,
+    );
+    this.name = "InsufficientAvailableBalanceError";
+  }
+}
+
+/**
  * Creates both wallet accounts (Play Coins, Winning Coins) for a new user,
  * both starting at a balance of 0. Intended to run inside the same
  * transaction as user creation, so a user can never exist without wallets.
@@ -67,9 +83,14 @@ export interface RecordTransactionInput {
  * double-crediting/debiting.
  *
  * Throws `InsufficientBalanceError` if applying `amount` would take the
- * wallet negative (checked here for a clean, catchable error; the
- * `wallet_accounts_balance_non_negative` DB constraint is the backstop of
- * last resort in case this check is ever bypassed).
+ * total settled balance negative.
+ *
+ * Throws `InsufficientAvailableBalanceError` if applying `amount` would
+ * take the settled balance below the currently reserved amount. This guards
+ * against spending coins that are locked by an active reservation (e.g. a
+ * pending withdrawal hold). The DB `balance >= reserved_balance` CHECK
+ * constraint is the backstop of last resort; this check provides the clean
+ * application error before that constraint can fire.
  */
 export async function recordCompletedTransaction(
   tx: DbExecutor,
@@ -103,8 +124,16 @@ export async function recordCompletedTransaction(
   }
 
   const balanceAfter = account.balance + input.amount;
+
   if (balanceAfter < 0) {
     throw new InsufficientBalanceError(account.walletType);
+  }
+
+  // For debits: ensure the resulting balance would not dip below the portion
+  // already locked by active reservations. For credits (positive amount),
+  // balanceAfter > balance >= reservedBalance, so this check always passes.
+  if (balanceAfter < account.reservedBalance) {
+    throw new InsufficientAvailableBalanceError(account.walletType);
   }
 
   const [transaction] = await tx
@@ -133,11 +162,21 @@ export async function recordCompletedTransaction(
   return transaction;
 }
 
+/**
+ * A per-coin-type balance snapshot, enriched with reservation data.
+ * available = balance - reserved (freely spendable).
+ */
+export interface CoinBalance {
+  balance: number;
+  reserved: number;
+  available: number;
+}
+
 export interface ConversionResult {
   debitTransaction: WalletTransaction;
   creditTransaction: WalletTransaction;
-  playCoinsBalance: number;
-  winningCoinsBalance: number;
+  playCoins: CoinBalance;
+  winningCoins: CoinBalance;
 }
 
 /**
@@ -151,6 +190,11 @@ export interface ConversionResult {
  * `idempotencyKey` is supplied by the caller (see routes/wallet.ts) and
  * suffixed per leg (`:debit` / `:credit`) so a retried request with the
  * same key cannot double-apply the conversion.
+ *
+ * Throws `InsufficientAvailableBalanceError` if the requested amount would
+ * spend coins that are locked by an active reservation. This is checked
+ * inside `recordCompletedTransaction` under the FOR UPDATE lock, so there
+ * is no TOCTOU gap between "check available balance" and "apply debit".
  */
 export async function convertWinningToPlay(
   userId: string,
@@ -189,6 +233,10 @@ export async function convertWinningToPlay(
 
     const conversionReferenceId = randomUUID();
 
+    // recordCompletedTransaction re-acquires the lock on winningAccount (same
+    // tx, same row — allowed). It checks both balanceAfter >= 0 and
+    // balanceAfter >= account.reservedBalance, so reserved coins can never
+    // be spent by a conversion.
     const debitTransaction = await recordCompletedTransaction(tx, {
       walletAccountId: winningAccount.id,
       amount: -amount,
@@ -207,11 +255,23 @@ export async function convertWinningToPlay(
       description: "Converted from Winning Coins",
     });
 
+    // reservedBalance on winningAccount is unchanged by this conversion
+    // (recordCompletedTransaction never touches reserved_balance), so the
+    // value locked before the debit is still valid for the available calc.
+    // Play Coins never have reservations, so playAccount.reservedBalance = 0.
     return {
       debitTransaction,
       creditTransaction,
-      playCoinsBalance: creditTransaction.balanceAfter,
-      winningCoinsBalance: debitTransaction.balanceAfter,
+      playCoins: {
+        balance: creditTransaction.balanceAfter,
+        reserved: playAccount.reservedBalance,
+        available: creditTransaction.balanceAfter - playAccount.reservedBalance,
+      },
+      winningCoins: {
+        balance: debitTransaction.balanceAfter,
+        reserved: winningAccount.reservedBalance,
+        available: debitTransaction.balanceAfter - winningAccount.reservedBalance,
+      },
     };
   });
 }

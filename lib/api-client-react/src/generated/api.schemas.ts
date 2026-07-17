@@ -76,11 +76,23 @@ export const WalletType = {
 } as const;
 
 /**
- * A user's current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches/tournaments and are the only balance that can be withdrawn.
+ * Balance snapshot for a single coin type. `available` is the freely spendable amount; `reserved` is locked by active holds (pending withdrawals, tournament entries, admin/fraud holds). available = balance − reserved.
+ */
+export interface WalletCoinBalance {
+  /** Total settled balance — the sum of all completed ledger entries. */
+  balance: number;
+  /** Coins locked by active reservations. Cannot be spent or converted until the hold is released or confirmed. */
+  reserved: number;
+  /** Freely spendable coins (balance minus reserved). */
+  available: number;
+}
+
+/**
+ * A user's current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches/tournaments and are the only balance that can be withdrawn. Each coin type exposes `balance` (total settled), `reserved` (locked by active holds), and `available` (freely spendable).
  */
 export interface WalletBalance {
-  playCoins: number;
-  winningCoins: number;
+  playCoins: WalletCoinBalance;
+  winningCoins: WalletCoinBalance;
 }
 
 /**

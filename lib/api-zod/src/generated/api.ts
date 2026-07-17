@@ -104,9 +104,17 @@ export const GetCurrentUserResponse = zod.object({
  * @summary Get the authenticated user's wallet balances
  */
 export const GetWalletBalanceResponse = zod.object({
-  "playCoins": zod.number(),
-  "winningCoins": zod.number()
-}).describe('A user\'s current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches\/tournaments and are the only balance that can be withdrawn.\n')
+  "playCoins": zod.object({
+  "balance": zod.number().describe('Total settled balance — the sum of all completed ledger entries.\n'),
+  "reserved": zod.number().describe('Coins locked by active reservations. Cannot be spent or converted until the hold is released or confirmed.\n'),
+  "available": zod.number().describe('Freely spendable coins (balance minus reserved).\n')
+}).describe('Balance snapshot for a single coin type. `available` is the freely spendable amount; `reserved` is locked by active holds (pending withdrawals, tournament entries, admin\/fraud holds). available = balance − reserved.\n'),
+  "winningCoins": zod.object({
+  "balance": zod.number().describe('Total settled balance — the sum of all completed ledger entries.\n'),
+  "reserved": zod.number().describe('Coins locked by active reservations. Cannot be spent or converted until the hold is released or confirmed.\n'),
+  "available": zod.number().describe('Freely spendable coins (balance minus reserved).\n')
+}).describe('Balance snapshot for a single coin type. `available` is the freely spendable amount; `reserved` is locked by active holds (pending withdrawals, tournament entries, admin\/fraud holds). available = balance − reserved.\n')
+}).describe('A user\'s current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches\/tournaments and are the only balance that can be withdrawn. Each coin type exposes `balance` (total settled), `reserved` (locked by active holds), and `available` (freely spendable).\n')
 
 
 /**
@@ -249,8 +257,16 @@ export const ConvertWinningToPlayBody = zod.object({
 })
 
 export const ConvertWinningToPlayResponse = zod.object({
-  "playCoins": zod.number(),
-  "winningCoins": zod.number()
-}).describe('A user\'s current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches\/tournaments and are the only balance that can be withdrawn.\n')
+  "playCoins": zod.object({
+  "balance": zod.number().describe('Total settled balance — the sum of all completed ledger entries.\n'),
+  "reserved": zod.number().describe('Coins locked by active reservations. Cannot be spent or converted until the hold is released or confirmed.\n'),
+  "available": zod.number().describe('Freely spendable coins (balance minus reserved).\n')
+}).describe('Balance snapshot for a single coin type. `available` is the freely spendable amount; `reserved` is locked by active holds (pending withdrawals, tournament entries, admin\/fraud holds). available = balance − reserved.\n'),
+  "winningCoins": zod.object({
+  "balance": zod.number().describe('Total settled balance — the sum of all completed ledger entries.\n'),
+  "reserved": zod.number().describe('Coins locked by active reservations. Cannot be spent or converted until the hold is released or confirmed.\n'),
+  "available": zod.number().describe('Freely spendable coins (balance minus reserved).\n')
+}).describe('Balance snapshot for a single coin type. `available` is the freely spendable amount; `reserved` is locked by active holds (pending withdrawals, tournament entries, admin\/fraud holds). available = balance − reserved.\n')
+}).describe('A user\'s current coin balances. 1 coin = ₹1. Play Coins are spent on entry fees and funded by deposits; Winning Coins are earned from matches\/tournaments and are the only balance that can be withdrawn. Each coin type exposes `balance` (total settled), `reserved` (locked by active holds), and `available` (freely spendable).\n')
 
 

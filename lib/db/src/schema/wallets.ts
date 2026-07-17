@@ -32,6 +32,10 @@ export const walletAccountsTable = pgTable(
     // is a denormalized cache of the wallet_transactions ledger sum, kept
     // in sync inside the same DB transaction as each ledger insert.
     balance: bigint("balance", { mode: "number" }).notNull().default(0),
+    // Amount locked by active reservations (pending withdrawals, tournament
+    // entries, admin/fraud holds). available_balance = balance - reserved_balance.
+    // Managed only through the reservation service; never updated directly.
+    reservedBalance: bigint("reserved_balance", { mode: "number" }).notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
@@ -43,6 +47,15 @@ export const walletAccountsTable = pgTable(
     unique("wallet_accounts_user_id_wallet_type_unique").on(table.userId, table.walletType),
     // Hard DB-level backstop: negative balances must never be possible.
     check("wallet_accounts_balance_non_negative", sql`${table.balance} >= 0`),
+    // reserved_balance must never go negative.
+    check("wallet_accounts_reserved_balance_non_negative", sql`${table.reservedBalance} >= 0`),
+    // Settled balance must always cover the reserved portion.
+    // IMPORTANT: during reservation confirmation, reserved_balance MUST be
+    // decremented before balance is decremented, because PostgreSQL evaluates
+    // CHECK constraints at statement level (not transaction commit). Reversing
+    // the order causes a mid-transaction constraint violation when multiple
+    // active reservations exist.
+    check("wallet_accounts_balance_gte_reserved", sql`${table.balance} >= ${table.reservedBalance}`),
   ],
 );
 
