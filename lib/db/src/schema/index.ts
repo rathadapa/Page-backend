@@ -4,3 +4,5 @@ export * from "./sessions";
 export * from "./wallets";
 export * from "./deposits";
 export * from "./reservations";
+export * from "./bank-accounts";
+export * from "./withdrawals";
