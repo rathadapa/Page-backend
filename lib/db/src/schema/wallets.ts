@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   bigint,
   check,
+  index,
   pgEnum,
   pgTable,
   text,
@@ -102,7 +103,17 @@ export const walletTransactionsTable = pgTable(
     description: text("description"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [check("wallet_transactions_amount_not_zero", sql`${table.amount} <> 0`)],
+  (table) => [
+    check("wallet_transactions_amount_not_zero", sql`${table.amount} <> 0`),
+    // Supports getWalletTransactions pagination (WHERE wallet_account_id = $1
+    // ORDER BY created_at DESC LIMIT $2) without a full table scan.
+    // Also covers the FK integrity check PostgreSQL performs on every
+    // INSERT/UPDATE/DELETE against this table.
+    index("wallet_transactions_account_created_idx").on(
+      table.walletAccountId,
+      table.createdAt,
+    ),
+  ],
 );
 
 export const insertWalletTransactionSchema = createInsertSchema(walletTransactionsTable).omit({

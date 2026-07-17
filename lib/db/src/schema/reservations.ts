@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   bigint,
   check,
+  index,
   pgEnum,
   pgTable,
   text,
@@ -10,7 +11,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
-import { walletAccountsTable } from "./wallets";
+import { walletAccountsTable, walletTransactionsTable } from "./wallets";
 
 // Lifecycle of a reservation. Once confirmed or released, the status is final.
 export const reservationStatusEnum = pgEnum("reservation_status", [
@@ -56,6 +57,17 @@ export const walletReservationsTable = pgTable(
     // A retried "create reservation" with the same key returns the existing
     // row without double-incrementing reserved_balance.
     idempotencyKey: text("idempotency_key").notNull().unique(),
+    // Set at confirmation time to the wallet_transactions row that debited
+    // the coins. This is the permanent, immutable audit link between the
+    // hold and the ledger entry that settled it. NULL while active or released.
+    confirmedByTransactionId: uuid("confirmed_by_transaction_id").references(
+      () => walletTransactionsTable.id,
+      { onDelete: "restrict" },
+    ),
+    // Reserved for future Withdrawal timeout handling. The reservation service
+    // does NOT enforce or act on this value — it is stored only so that an
+    // external cleanup job can filter and release stale reservations.
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
     releasedAt: timestamp("released_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -67,6 +79,10 @@ export const walletReservationsTable = pgTable(
   (table) => [
     // Reservations of zero or negative amounts make no sense.
     check("wallet_reservations_amount_positive", sql`${table.amount} > 0`),
+    // Supports getActiveReservationsForAccount and any "how many active holds
+    // does this account have?" query — covers both the FK integrity check on
+    // every INSERT/UPDATE/DELETE and the WHERE wallet_account_id + status filter.
+    index("wallet_reservations_account_status_idx").on(table.walletAccountId, table.status),
   ],
 );
 
@@ -75,6 +91,8 @@ export const insertWalletReservationSchema = createInsertSchema(
 ).omit({
   id: true,
   status: true,
+  // Set internally by confirmReservation(); callers must never supply this.
+  confirmedByTransactionId: true,
   confirmedAt: true,
   releasedAt: true,
   createdAt: true,

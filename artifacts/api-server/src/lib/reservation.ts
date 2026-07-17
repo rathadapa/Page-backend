@@ -17,6 +17,32 @@ import {
 // handle (`tx`) passed down from `db.transaction(...)`.
 type DbExecutor = Parameters<Parameters<typeof db.transaction>[0]>[0] | typeof db;
 
+// ── Transaction guard ──────────────────────────────────────────────────────────
+
+/**
+ * Asserts that `executor` is a transaction handle, not the bare `db`.
+ *
+ * Reservation mutations are multi-statement operations that must be atomic:
+ * a crash or error between any two statements would leave `reserved_balance`
+ * inconsistent with `wallet_reservations`. Calling these functions with the
+ * bare `db` (auto-commit mode) would commit each statement independently,
+ * permanently corrupting the invariant.
+ *
+ * This guard is the last line of defence against accidental bare-db usage.
+ * It runs synchronously at the very start of each mutation function so no
+ * statements execute before the context is verified.
+ */
+function assertIsTransaction(executor: DbExecutor, fnName: string): void {
+  if (executor === (db as unknown)) {
+    throw new Error(
+      `${fnName}() must be called inside a db.transaction() context. ` +
+        `Calling it with the bare 'db' object makes its operations non-atomic: ` +
+        `a crash between any two statements permanently corrupts reserved_balance. ` +
+        `Wrap the call: await db.transaction(async (tx) => { await ${fnName}(tx, ...); });`,
+    );
+  }
+}
+
 export type ReservationReasonType =
   | "withdrawal"
   | "tournament_entry"
@@ -39,6 +65,11 @@ export interface CreateReservationInput {
    * reserved_balance.
    */
   idempotencyKey: string;
+  /**
+   * Optional future-expiry timestamp. The reservation service does NOT enforce
+   * this — it is stored only for an external cleanup job to act on.
+   */
+  expiresAt?: Date;
 }
 
 /**
@@ -47,8 +78,9 @@ export interface CreateReservationInput {
  * but are excluded from `available_balance` until the reservation is confirmed
  * or released.
  *
- * Must be called inside a `db.transaction(...)` so the wallet account update
- * and the reservation insert are atomic.
+ * **Must be called inside a `db.transaction(...)`.** Calling with the bare `db`
+ * throws immediately — the multi-step operation is not atomic outside a
+ * transaction.
  *
  * Throws `InsufficientAvailableBalanceError` when
  * `account.balance - account.reservedBalance < input.amount`.
@@ -60,6 +92,8 @@ export async function createReservation(
   tx: DbExecutor,
   input: CreateReservationInput,
 ): Promise<WalletReservation> {
+  assertIsTransaction(tx, "createReservation");
+
   // Lock the wallet account first so the available-balance check and the
   // reserved_balance increment are serialized against all concurrent
   // operations targeting this account.
@@ -109,6 +143,7 @@ export async function createReservation(
       reasonType: input.reasonType,
       reasonId: input.reasonId,
       idempotencyKey: input.idempotencyKey,
+      expiresAt: input.expiresAt,
     })
     .returning();
 
@@ -127,16 +162,19 @@ export async function createReservation(
  * `released`. No ledger entry is written — the user's settled balance was
  * never changed.
  *
+ * **Must be called inside a `db.transaction(...)`.** Calling with the bare `db`
+ * throws immediately.
+ *
  * Idempotent: releasing an already-released reservation is a no-op (returns
  * the existing reservation). Throws if the reservation is already confirmed
  * (coins have already been debited; use a credit/reversal instead).
- *
- * Must be called inside a `db.transaction(...)`.
  */
 export async function releaseReservation(
   tx: DbExecutor,
   reservationId: string,
 ): Promise<WalletReservation> {
+  assertIsTransaction(tx, "releaseReservation");
+
   // Unlocked pre-read to learn which wallet account to lock. The
   // walletAccountId field is immutable after creation.
   const [info] = await tx
@@ -225,24 +263,32 @@ export interface ConfirmReservationInput {
  * Confirms a reservation: permanently debits the reserved coins from the
  * wallet account and records an immutable ledger entry.
  *
+ * **Must be called inside a `db.transaction(...)`.** Calling with the bare `db`
+ * throws immediately.
+ *
  * **Critical operation order (do not reorder):**
  * 1. Decrement `reserved_balance` first.
  * 2. Call `recordCompletedTransaction` (debits `balance`) second.
+ * 3. Mark reservation `confirmed` and set `confirmed_by_transaction_id` third.
  *
  * PostgreSQL evaluates CHECK constraints at statement level, not at transaction
  * commit. If multiple reservations are active and `balance` is decremented
  * before `reserved_balance`, the intermediate state `balance < reserved_balance`
  * violates the DB constraint mid-transaction. This order avoids that.
  *
+ * `confirmed_by_transaction_id` is the permanent audit link between the
+ * reservation and the ledger entry that settled it. It is set atomically in
+ * the same statement that marks the reservation confirmed.
+ *
  * Idempotent on `transactionIdempotencyKey`: if the reservation is already
  * confirmed and the ledger entry exists, returns both without any writes.
- *
- * Must be called inside a `db.transaction(...)`.
  */
 export async function confirmReservation(
   tx: DbExecutor,
   input: ConfirmReservationInput,
 ): Promise<{ reservation: WalletReservation; transaction: WalletTransaction }> {
+  assertIsTransaction(tx, "confirmReservation");
+
   // Unlocked pre-read to learn which wallet account to lock.
   const [info] = await tx
     .select({
@@ -323,10 +369,18 @@ export async function confirmReservation(
     description: input.description,
   });
 
-  // ── Step 3: Mark reservation as confirmed ───────────────────────────────────
+  // ── Step 3: Mark reservation confirmed + set audit link ─────────────────────
+  // confirmed_by_transaction_id is set atomically in the same UPDATE that
+  // changes the status. Once written it is immutable — no code path updates
+  // it again, and onDelete: "restrict" on the FK prevents the transaction row
+  // from ever being deleted while the link exists.
   const [confirmed] = await tx
     .update(walletReservationsTable)
-    .set({ status: "confirmed", confirmedAt: new Date() })
+    .set({
+      status: "confirmed",
+      confirmedAt: new Date(),
+      confirmedByTransactionId: walletTx.id,
+    })
     .where(eq(walletReservationsTable.id, input.reservationId))
     .returning();
 

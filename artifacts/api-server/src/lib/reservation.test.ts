@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import {
   db,
   usersTable,
@@ -78,12 +78,14 @@ afterAll(async () => {
   if (!userId) return;
 
   // Delete in FK-safe order.
-  await db
-    .delete(walletTransactionsTable)
-    .where(inArray(walletTransactionsTable.walletAccountId, walletAccountIds));
+  // wallet_reservations references wallet_transactions (confirmed_by_transaction_id)
+  // so reservations must be deleted before transactions.
   await db
     .delete(walletReservationsTable)
     .where(inArray(walletReservationsTable.walletAccountId, walletAccountIds));
+  await db
+    .delete(walletTransactionsTable)
+    .where(inArray(walletTransactionsTable.walletAccountId, walletAccountIds));
   await db
     .delete(walletAccountsTable)
     .where(inArray(walletAccountsTable.id, walletAccountIds));
@@ -850,5 +852,312 @@ describe("CHECK constraint protection", () => {
     await db.transaction(async (tx) => {
       await releaseReservation(tx, reservation.id);
     });
+  });
+});
+
+// ── Transaction guard ─────────────────────────────────────────────────────────
+
+describe("transaction guard", () => {
+  it("createReservation throws immediately when called with bare db (not a transaction)", async () => {
+    await expect(
+      
+      createReservation(db, {
+        walletAccountId: winningAccountId,
+        amount: 10,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:guard:create`,
+      }),
+    ).rejects.toThrow(/must be called inside a db\.transaction\(\)/i);
+
+    // No DB state must have changed — the guard fires before any statement.
+    const rows = await db
+      .select()
+      .from(walletReservationsTable)
+      .where(eq(walletReservationsTable.idempotencyKey, `${prefix}:guard:create`));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("releaseReservation throws immediately when called with bare db", async () => {
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 10,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:guard:release:setup`,
+      });
+    });
+
+    const before = await getAccount(winningAccountId);
+
+    await expect(
+      
+      releaseReservation(db, reservation.id),
+    ).rejects.toThrow(/must be called inside a db\.transaction\(\)/i);
+
+    // reserved_balance unchanged — the guard fired before any statement.
+    const after = await getAccount(winningAccountId);
+    expect(after.reservedBalance).toBe(before.reservedBalance);
+
+    const row = await getReservation(reservation.id);
+    expect(row!.status).toBe("active");
+
+    await db.transaction(async (tx) => {
+      await releaseReservation(tx, reservation.id);
+    });
+  });
+
+  it("confirmReservation throws immediately when called with bare db", async () => {
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 10,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:guard:confirm:setup`,
+      });
+    });
+
+    const before = await getAccount(winningAccountId);
+
+    await expect(
+      
+      confirmReservation(db, {
+        reservationId: reservation.id,
+        transactionIdempotencyKey: `${prefix}:guard:confirm:tx`,
+      }),
+    ).rejects.toThrow(/must be called inside a db\.transaction\(\)/i);
+
+    // No balance change, no ledger entry, reservation still active.
+    const after = await getAccount(winningAccountId);
+    expect(after.balance).toBe(before.balance);
+    expect(after.reservedBalance).toBe(before.reservedBalance);
+
+    const row = await getReservation(reservation.id);
+    expect(row!.status).toBe("active");
+
+    const txRows = await db
+      .select()
+      .from(walletTransactionsTable)
+      .where(eq(walletTransactionsTable.idempotencyKey, `${prefix}:guard:confirm:tx`));
+    expect(txRows).toHaveLength(0);
+
+    await db.transaction(async (tx) => {
+      await releaseReservation(tx, reservation.id);
+    });
+  });
+});
+
+// ── confirmed_by_transaction_id audit link ────────────────────────────────────
+
+describe("confirmed_by_transaction_id audit link", () => {
+  it("is NULL on a freshly created reservation", async () => {
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 20,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:audit:create`,
+      });
+    });
+
+    expect(reservation.confirmedByTransactionId).toBeNull();
+
+    await db.transaction(async (tx) => {
+      await releaseReservation(tx, reservation.id);
+    });
+  });
+
+  it("is NULL on a released reservation (no ledger entry was written)", async () => {
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 20,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:audit:release`,
+      });
+    });
+
+    const released = await db.transaction(async (tx) => {
+      return releaseReservation(tx, reservation.id);
+    });
+
+    expect(released.confirmedByTransactionId).toBeNull();
+  });
+
+  it("is set to the ledger transaction ID atomically at confirmation", async () => {
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 30,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:audit:confirm`,
+      });
+    });
+
+    const { reservation: confirmed, transaction: walletTx } = await db.transaction(
+      async (tx) => {
+        return confirmReservation(tx, {
+          reservationId: reservation.id,
+          transactionIdempotencyKey: `${prefix}:audit:confirm:tx`,
+          referenceType: "withdrawal",
+          description: "Audit link test",
+        });
+      },
+    );
+
+    // The link must point exactly to the ledger entry returned by confirmReservation.
+    expect(confirmed.confirmedByTransactionId).not.toBeNull();
+    expect(confirmed.confirmedByTransactionId).toBe(walletTx.id);
+
+    // The referenced transaction row must exist and carry the correct debit.
+    const [txRow] = await db
+      .select()
+      .from(walletTransactionsTable)
+      .where(eq(walletTransactionsTable.id, walletTx.id));
+    expect(txRow).toBeDefined();
+    expect(txRow!.amount).toBe(-30);
+  });
+
+  it("audit link is stable across idempotent re-confirmation", async () => {
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 25,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:audit:idempotent`,
+      });
+    });
+
+    const { reservation: confirmed, transaction: walletTx } = await db.transaction(
+      async (tx) => {
+        return confirmReservation(tx, {
+          reservationId: reservation.id,
+          transactionIdempotencyKey: `${prefix}:audit:idempotent:tx`,
+        });
+      },
+    );
+
+    // Retry with same key — must return the same data, link unchanged.
+    const { reservation: confirmed2, transaction: walletTx2 } = await db.transaction(
+      async (tx) => {
+        return confirmReservation(tx, {
+          reservationId: reservation.id,
+          transactionIdempotencyKey: `${prefix}:audit:idempotent:tx`,
+        });
+      },
+    );
+
+    expect(confirmed2.confirmedByTransactionId).toBe(confirmed.confirmedByTransactionId);
+    expect(walletTx2.id).toBe(walletTx.id);
+  });
+});
+
+// ── expires_at column ─────────────────────────────────────────────────────────
+
+describe("expires_at column", () => {
+  it("defaults to NULL when not provided", async () => {
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 15,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:expiry:null`,
+      });
+    });
+
+    expect(reservation.expiresAt).toBeNull();
+
+    await db.transaction(async (tx) => {
+      await releaseReservation(tx, reservation.id);
+    });
+  });
+
+  it("stores a future expiry timestamp when provided", async () => {
+    const future = new Date(Date.now() + 24 * 60 * 60 * 1000); // +1 day
+
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 15,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:expiry:set`,
+        expiresAt: future,
+      });
+    });
+
+    expect(reservation.expiresAt).not.toBeNull();
+    // 1-second tolerance for DB timestamp rounding.
+    expect(Math.abs(reservation.expiresAt!.getTime() - future.getTime())).toBeLessThan(1000);
+
+    await db.transaction(async (tx) => {
+      await releaseReservation(tx, reservation.id);
+    });
+  });
+
+  it("a reservation with a past expires_at remains active — cleanup is external, not automatic", async () => {
+    const past = new Date(Date.now() - 60_000); // 1 minute ago
+
+    const reservation = await db.transaction(async (tx) => {
+      return createReservation(tx, {
+        walletAccountId: winningAccountId,
+        amount: 15,
+        reasonType: "withdrawal",
+        idempotencyKey: `${prefix}:expiry:past`,
+        expiresAt: past,
+      });
+    });
+
+    // The service must NOT auto-expire — status must still be active.
+    expect(reservation.status).toBe("active");
+    expect(reservation.expiresAt!.getTime()).toBeLessThan(Date.now());
+
+    await db.transaction(async (tx) => {
+      await releaseReservation(tx, reservation.id);
+    });
+  });
+});
+
+// ── Index existence (live DB) ─────────────────────────────────────────────────
+
+describe("database index verification", () => {
+  it("wallet_reservations has a composite index on (wallet_account_id, status)", async () => {
+    const result = await db.execute(
+      sql`SELECT indexname, indexdef FROM pg_indexes
+          WHERE tablename = 'wallet_reservations'
+            AND indexname = 'wallet_reservations_account_status_idx'`,
+    );
+    expect(result.rows).toHaveLength(1);
+    const row = result.rows[0] as { indexdef: string };
+    expect(row.indexdef).toContain("wallet_account_id");
+    expect(row.indexdef).toContain("status");
+  });
+
+  it("wallet_transactions has a composite index on (wallet_account_id, created_at)", async () => {
+    const result = await db.execute(
+      sql`SELECT indexname, indexdef FROM pg_indexes
+          WHERE tablename = 'wallet_transactions'
+            AND indexname = 'wallet_transactions_account_created_idx'`,
+    );
+    expect(result.rows).toHaveLength(1);
+    const row = result.rows[0] as { indexdef: string };
+    expect(row.indexdef).toContain("wallet_account_id");
+    expect(row.indexdef).toContain("created_at");
+  });
+
+  it("wallet_reservations has a unique index on idempotency_key", async () => {
+    const result = await db.execute(
+      sql`SELECT indexname FROM pg_indexes
+          WHERE tablename = 'wallet_reservations'
+            AND indexname = 'wallet_reservations_idempotency_key_unique'`,
+    );
+    expect(result.rows).toHaveLength(1);
+  });
+
+  it("wallet_transactions has a unique index on idempotency_key", async () => {
+    const result = await db.execute(
+      sql`SELECT indexname FROM pg_indexes
+          WHERE tablename = 'wallet_transactions'
+            AND indexname = 'wallet_transactions_idempotency_key_unique'`,
+    );
+    expect(result.rows).toHaveLength(1);
   });
 });
